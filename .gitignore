@@ -3,3 +3,4 @@ data/*
 !data/.htaccess
 !data/index.html
 .vscode/launch.json
+__pycache__/*
