@@ -117,12 +117,15 @@ def ensure_webhook_recent():
 # Logic Handlers
 # ----------------------------------------------------------------------
 
-def handle_get_messages():
+def handle_get_messages(msgfile_path = ""):
     """Получение недоставленных сообщений"""
     if not is_allowed_ip():
         return jsonify({'error': 'Forbidden by IP'}), 403
+    
+    if not msgfile_path:
+        msgfile_path = config.MESSAGES_FILE
 
-    messages = read_json_file(config.MESSAGES_FILE, [])
+    messages = read_json_file(msgfile_path, [])
     out_messages = []
     indexes_to_mark = []
     
@@ -158,7 +161,7 @@ def handle_get_messages():
         for idx in indexes_to_mark:
             messages[idx]['delivered'] = True
             messages[idx]['delivered_at'] = time.time()
-        atomic_write_json(config.MESSAGES_FILE, messages)
+        atomic_write_json(msgfile_path, messages)
 
     return jsonify({'messages': out_messages})
 
@@ -266,18 +269,9 @@ def main_router():
     
     elif action == 'extpoll_get_messages':
         if config.SEND_TO_TG_THROUGH_EXTERNAL_POLL:
-             # Логика та же, что и у get_messages, но для другого файла?
-             # В PHP оригинале вызывался endpoint_get_messages с путем к другому файлу.
-             # Реализуем упрощенно выдачу файла:
-             if not check_token(config.EXTERNAL_ACCESS_TOKEN, req_token):
+            if not check_token(config.EXTERNAL_ACCESS_TOKEN, req_token):
                 return jsonify({'error': 'Forbidden'}), 403
-             # Здесь можно дописать отдельную функцию чтения/очистки файла externalpoll
-             # Для краткости вернем всё содержимое и очистим
-             path = config.SEND_TO_TG_THROUGH_EXTERNAL_POLL_MESSAGES_FILE
-             msgs = read_json_file(path, [])
-             # Очищаем после отдачи? В оригинале get_messages помечал delivered.
-             # Просто вернем данные.
-             return jsonify({'messages': msgs})
+            return handle_get_messages(config.SEND_TO_TG_THROUGH_EXTERNAL_POLL_MESSAGES_FILE)
         else:
             return jsonify("Sending to TG by poll is disabled")
 
@@ -317,9 +311,11 @@ def main_router():
     elif action == 'extpoll_delete_messages':
         if not check_token(config.ADMIN_TOKEN, req_token):
              return jsonify({'error': 'Forbidden'}), 403
-        path = config.SEND_TO_TG_THROUGH_EXTERNAL_POLL_MESSAGES_FILE
-        if os.path.exists(path):
-            os.remove(path)
+        if not is_allowed_ip():
+            return jsonify({'error': 'Forbidden by IP'}), 403
+        
+        if os.path.exists(config.SEND_TO_TG_THROUGH_EXTERNAL_POLL_MESSAGES_FILE):
+            os.remove(config.SEND_TO_TG_THROUGH_EXTERNAL_POLL_MESSAGES_FILE)
         return jsonify({'ok': True})
 
     # --- Webhook Handler (POST from Telegram) ---
