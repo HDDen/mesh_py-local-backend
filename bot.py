@@ -1,12 +1,14 @@
-# pip install flask requests
+# pip install flask requests filelock
 import os
 import json
 import time
 import hashlib
 import hmac
 import requests
+import uuid
 from flask import Flask, request, jsonify, Response, render_template_string
 from datetime import datetime
+from filelock import FileLock, Timeout
 import config
 
 # Инициализация Flask приложения
@@ -22,12 +24,22 @@ if not os.path.exists(config.DATA_DIR):
 
 def atomic_write_json(path, data):
     """Безопасная запись JSON файла (пишем в temp, потом переименовываем)"""
-    tmp_path = path + '.tmp'
+    tmp_path = path + "." + str(uuid.uuid4().hex) +  '.tmp'
+
+    lock = FileLock(path + ".lock", timeout=3)
+
     try:
-        with open(tmp_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, path)
-        return True
+        with lock:
+
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, path)
+            return True
+            
+    except Timeout:
+        print("atomic_write_json: не удалось получить блокировку")
+        return False
+    
     except Exception as e:
         print(f"Error writing file {path}: {e}")
         if os.path.exists(tmp_path):
@@ -125,43 +137,57 @@ def handle_get_messages(msgfile_path = ""):
     if not msgfile_path:
         msgfile_path = config.MESSAGES_FILE
 
-    messages = read_json_file(msgfile_path, [])
+    # дефолт
     out_messages = []
-    indexes_to_mark = []
-    
-    requested_chat_id = request.json.get('chat_id') if request.is_json else None
 
-    for i, m in enumerate(messages):
-        if not m.get('delivered', False):
-            # Фильтрация по chat_id если он передан
-            msg_chat_id = m.get('chat_id', '')
-            if requested_chat_id and str(requested_chat_id) != str(msg_chat_id):
-                continue
+    # реализуем filelock
+    lock = FileLock(msgfile_path + ".reading.lock", timeout=3)
 
-            # Формируем имя
-            name = m.get('username')
-            if not name:
-                parts = [p for p in [m.get('first_name'), m.get('last_name')] if p]
-                name = ' '.join(parts) if parts else 'Unknown'
+    try:
+        with lock:  # здесь другие процессы будут ждать
+            # продолжаем работу
+            messages = read_json_file(msgfile_path, [])
+            indexes_to_mark = []
             
-            ts = m.get('date_ts', time.time())
-            # Формат даты как в PHP: d.m H:i
-            date_str = datetime.fromtimestamp(ts).strftime('%d.%m %H:%M')
+            requested_chat_id = request.json.get('chat_id') if request.is_json else None
 
-            out_messages.append({
-                'name': name,
-                'date': date_str,
-                'msg': m.get('text', ''),
-                'chat_id': m.get('chat_id', '')
-            })
-            indexes_to_mark.append(i)
+            for i, m in enumerate(messages):
+                if not m.get('delivered', False):
+                    # Фильтрация по chat_id если он передан
+                    msg_chat_id = m.get('chat_id', '')
+                    if requested_chat_id and str(requested_chat_id) != str(msg_chat_id):
+                        continue
+
+                    # Формируем имя
+                    name = m.get('username')
+                    if not name:
+                        parts = [p for p in [m.get('first_name'), m.get('last_name')] if p]
+                        name = ' '.join(parts) if parts else 'Unknown'
+                    
+                    ts = m.get('date_ts', time.time())
+                    # Формат даты как в PHP: d.m H:i
+                    date_str = datetime.fromtimestamp(ts).strftime('%d.%m %H:%M')
+
+                    out_messages.append({
+                        'name': name,
+                        'date': date_str,
+                        'msg': m.get('text', ''),
+                        'chat_id': m.get('chat_id', '')
+                    })
+                    indexes_to_mark.append(i)
+            
+            # Отмечаем как доставленные
+            if indexes_to_mark:
+                for idx in indexes_to_mark:
+                    messages[idx]['delivered'] = True
+                    messages[idx]['delivered_at'] = time.time()
+                atomic_write_json(msgfile_path, messages)
+
+    except Timeout:
+        print("handle_get_messages: не удалось получить блокировку")
     
-    # Отмечаем как доставленные
-    if indexes_to_mark:
-        for idx in indexes_to_mark:
-            messages[idx]['delivered'] = True
-            messages[idx]['delivered_at'] = time.time()
-        atomic_write_json(msgfile_path, messages)
+    except Exception as e:
+        print("handle_get_messages: не удалось выполниться", e)
 
     return jsonify({'messages': out_messages})
 
